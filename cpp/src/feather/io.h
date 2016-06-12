@@ -18,15 +18,15 @@
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
-#include <stdio.h>
 #include <string>
-#include <vector>
-
-#include "feather/buffer.h"
 
 namespace feather {
 
+class Buffer;
+class OwnedMutableBuffer;
 class Status;
+
+class FileInterface;
 
 // ----------------------------------------------------------------------
 // Input interfaces
@@ -61,9 +61,7 @@ class RandomAccessReader {
 // level seek and read calls.
 class LocalFileReader : public RandomAccessReader {
  public:
-  LocalFileReader() :
-      file_(nullptr),
-      is_open_(false) {}
+  LocalFileReader();
 
   virtual ~LocalFileReader();
 
@@ -75,13 +73,8 @@ class LocalFileReader : public RandomAccessReader {
 
   virtual Status Read(int64_t nbytes, std::shared_ptr<Buffer>* out);
 
-  bool is_open() const { return is_open_;}
-  const std::string& path() const { return path_;}
-
  protected:
-  std::string path_;
-  FILE* file_;
-  bool is_open_;
+  std::unique_ptr<FileInterface> impl_;
 };
 
 class MemoryMapReader : public LocalFileReader {
@@ -100,9 +93,6 @@ class MemoryMapReader : public LocalFileReader {
   virtual Status Seek(int64_t pos);
   virtual Status Read(int64_t nbytes, std::shared_ptr<Buffer>* out);
 
-  bool is_open() const { return is_open_;}
-  const std::string& path() const { return path_;}
-
  private:
   uint8_t* data_;
   int64_t pos_;
@@ -112,12 +102,7 @@ class MemoryMapReader : public LocalFileReader {
 // A file-like object that reads from virtual address space
 class BufferReader : public RandomAccessReader {
  public:
-  explicit BufferReader(const std::shared_ptr<Buffer>& buffer) :
-      buffer_(buffer),
-      data_(buffer->data()),
-      pos_(0) {
-    size_ = buffer->size();
-  }
+  explicit BufferReader(const std::shared_ptr<Buffer>& buffer);
 
   virtual int64_t Tell() const;
   virtual Status Seek(int64_t pos);
@@ -141,6 +126,7 @@ class BufferReader : public RandomAccessReader {
 class OutputStream {
  public:
   virtual ~OutputStream() {}
+
   // Close the output stream
   virtual Status Close() = 0;
 
@@ -154,6 +140,8 @@ class OutputStream {
 class InMemoryOutputStream : public OutputStream {
  public:
   explicit InMemoryOutputStream(int64_t initial_capacity);
+
+  virtual ~InMemoryOutputStream() {}
 
   virtual Status Close();
 
@@ -174,8 +162,8 @@ class InMemoryOutputStream : public OutputStream {
 
 class FileOutputStream : public OutputStream {
  public:
-  FileOutputStream():
-      file_(nullptr), is_open_(false) {}
+  FileOutputStream();
+  ~FileOutputStream();
 
   Status Open(const std::string& path);
 
@@ -189,9 +177,7 @@ class FileOutputStream : public OutputStream {
   std::shared_ptr<Buffer> Finish();
 
  private:
-  std::string path_;
-  FILE* file_;
-  bool is_open_;
+  std::unique_ptr<FileInterface> impl_;
 };
 
 } // namespace feather

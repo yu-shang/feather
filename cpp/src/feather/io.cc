@@ -28,6 +28,15 @@
 #include <cstring>
 #include <sstream>
 
+#ifdef _FILE_OFFSET_BITS
+#undef _FILE_OFFSET_BITS
+#endif
+
+#define _FILE_OFFSET_BITS 64
+
+#include <cstdio>
+
+#include "feather/buffer.h"
 #include "feather/status.h"
 
 namespace feather {
@@ -43,6 +52,13 @@ Status RandomAccessReader::ReadAt(int64_t position, int64_t nbytes,
   // TODO(wesm): boundchecking
   RETURN_NOT_OK(Seek(position));
   return Read(nbytes, out);
+}
+
+BufferReader::BufferReader(const std::shared_ptr<Buffer>& buffer) :
+    buffer_(buffer),
+    data_(buffer->data()),
+    pos_(0) {
+  size_ = buffer->size();
 }
 
 int64_t BufferReader::Tell() const {
@@ -70,60 +86,131 @@ Status BufferReader::Read(int64_t nbytes, std::shared_ptr<Buffer>* out) {
 // ----------------------------------------------------------------------
 // LocalFileReader methods
 
+
+class FileInterface {
+ public:
+  FileInterface() :
+      file_(nullptr), is_open_(false), size_(-1) {}
+
+  ~FileInterface() {}
+
+  Status OpenWritable(const std::string& path) {
+    path_ = path;
+    file_ = fopen(path.c_str(), "wb");
+    if (file_ == nullptr || ferror(file_)) {
+      return Status::IOError("Unable to open file");
+    }
+    is_open_ = true;
+    return Status::OK();
+  }
+
+  Status OpenReadOnly(const std::string& path) {
+    path_ = path;
+    file_ = fopen(path.c_str(), "r");
+    if (file_ == nullptr) {
+      return Status::IOError("Unable to open file");
+    }
+
+    // Get and set file size
+    fseeko(file_, static_cast<off_t>(0), SEEK_END);
+    if (ferror(file_)) {
+      return Status::IOError("Unable to seek to end of file");
+    }
+
+    size_ = ftello(file_);
+
+    RETURN_NOT_OK(Seek(0));
+
+    is_open_ = true;
+
+    return Status::OK();
+  }
+
+  Status Close() {
+    if (is_open_) {
+      int code = fclose(file_);
+      is_open_ = false;
+      if (code != 0) {
+        return Status::IOError("error closing file");
+      }
+    }
+    return Status::OK();
+  }
+
+  Status Read(int64_t nbytes, std::shared_ptr<Buffer>* out) {
+    auto buffer = std::make_shared<OwnedMutableBuffer>();
+    RETURN_NOT_OK(buffer->Resize(nbytes));
+    int64_t bytes_read = fread(buffer->mutable_data(), 1, nbytes, file_);
+    if (bytes_read < nbytes) {
+      // Exception if not EOF
+      if (!feof(file_)) {
+        return Status::IOError("Error reading bytes from file");
+      }
+      RETURN_NOT_OK(buffer->Resize(bytes_read));
+    }
+    *out = buffer;
+    return Status::OK();
+  }
+
+  Status Seek(int64_t pos) {
+    fseeko(file_, static_cast<off_t>(pos), SEEK_SET);
+    return Status::OK();
+  }
+
+  int64_t Tell() const {
+    return static_cast<int64_t>(ftello(file_));
+  }
+
+  Status Write(const uint8_t* data, int64_t length) {
+    fwrite(data, 1, length, file_);
+    if (ferror(file_)) {
+      return Status::IOError("error writing bytes to file");
+    }
+    return Status::OK();
+  }
+
+  int fd_number() const { return fileno(file_);}
+
+  bool is_open() const { return is_open_;}
+  const std::string& path() const { return path_;}
+
+  int64_t size() const { return size_;}
+
+ private:
+  std::string path_;
+  FILE* file_;
+  bool is_open_;
+  int64_t size_;
+};
+
+LocalFileReader::LocalFileReader() {
+  impl_.reset(new FileInterface());
+}
+
 LocalFileReader::~LocalFileReader() {
   CloseFile();
 }
 
 Status LocalFileReader::Open(const std::string& path) {
-  path_ = path;
-  file_ = fopen(path.c_str(), "r");
-  if (file_ == nullptr) {
-    return Status::IOError("Unable to open file");
-  }
-
-  // Get and set file size
-  fseek(file_, 0L, SEEK_END);
-  if (ferror(file_)) {
-    return Status::IOError("Unable to seek to end of file");
-  }
-
-  size_ = ftell(file_);
-  RETURN_NOT_OK(Seek(0));
-
-  is_open_ = true;
-
+  RETURN_NOT_OK(impl_->OpenReadOnly(path));
+  size_ = impl_->size();
   return Status::OK();
 }
 
 void LocalFileReader::CloseFile() {
-  if (is_open_) {
-    fclose(file_);
-    is_open_ = false;
-  }
+  impl_->Close();
 }
 
 Status LocalFileReader::Seek(int64_t pos) {
-  fseek(file_, pos, SEEK_SET);
-  return Status::OK();
+  return impl_->Seek(pos);
 }
 
 int64_t LocalFileReader::Tell() const {
-  return ftell(file_);
+  return impl_->Tell();
 }
 
 Status LocalFileReader::Read(int64_t nbytes, std::shared_ptr<Buffer>* out) {
-  auto buffer = std::make_shared<OwnedMutableBuffer>();
-  RETURN_NOT_OK(buffer->Resize(nbytes));
-  int64_t bytes_read = fread(buffer->mutable_data(), 1, nbytes, file_);
-  if (bytes_read < nbytes) {
-    // Exception if not EOF
-    if (!feof(file_)) {
-      return Status::IOError("Error reading bytes from file");
-    }
-    RETURN_NOT_OK(buffer->Resize(bytes_read));
-  }
-  *out = buffer;
-  return Status::OK();
+  return impl_->Read(nbytes, out);
 }
 
 // ----------------------------------------------------------------------
@@ -136,7 +223,7 @@ MemoryMapReader::~MemoryMapReader() {
 Status MemoryMapReader::Open(const std::string& path) {
   RETURN_NOT_OK(LocalFileReader::Open(path));
   data_ = reinterpret_cast<uint8_t*>(mmap(nullptr, size_, PROT_READ,
-          MAP_SHARED, fileno(file_), 0));
+          MAP_SHARED, impl_->fd_number(), 0));
   if (data_ == nullptr) {
     return Status::IOError("Memory mapping file failed");
   }
@@ -220,34 +307,26 @@ std::shared_ptr<Buffer> InMemoryOutputStream::Finish() {
 // ----------------------------------------------------------------------
 // FileOutputStream
 
-Status FileOutputStream::Open(const std::string& path) {
-  path_ = path;
-  file_ = fopen(path.c_str(), "wb");
-  if (file_ == nullptr || ferror(file_)) {
-    return Status::IOError("Unable to open file");
-  }
+FileOutputStream::FileOutputStream() {
+  impl_.reset(new FileInterface());
+}
 
-  return Status::OK();
+FileOutputStream::~FileOutputStream() {}
+
+Status FileOutputStream::Open(const std::string& path) {
+  return impl_->OpenWritable(path);
 }
 
 Status FileOutputStream::Close() {
-  int code = fclose(file_);
-  if (code != 0) {
-    return Status::IOError("error closing file");
-  }
-  return Status::OK();
+  return impl_->Close();
 }
 
 int64_t FileOutputStream::Tell() const {
-  return ftell(file_);
+  return impl_->Tell();
 }
 
 Status FileOutputStream::Write(const uint8_t* data, int64_t length) {
-  fwrite(data, 1, length, file_);
-  if (ferror(file_)) {
-    return Status::IOError("error writing bytes to file");
-  }
-  return Status::OK();
+  return impl_->Write(data, length);
 }
 
 } // namespace feather
