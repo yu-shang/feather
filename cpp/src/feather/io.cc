@@ -86,6 +86,25 @@ Status BufferReader::Read(int64_t nbytes, std::shared_ptr<Buffer>* out) {
 // ----------------------------------------------------------------------
 // LocalFileReader methods
 
+static int fseek_compat(FILE* handle, int64_t offset, int whence) {
+#if defined(__MINGW32__)
+  return fseeko64(handle, offset, whence);
+#elif defined(_WIN32)
+  return _fseeki64(handle, offset, whence);
+#else
+  return fseeko(handle, offset, whence);
+#endif
+}
+
+static int64_t ftell_compat(FILE* handle) {
+#if defined(__MINGW32__)
+  return ftello64(handle);
+#elif defined(_WIN32)
+  return _ftelli64(handle);
+#else
+  return ftello(handle);
+#endif
+}
 
 class FileInterface {
  public:
@@ -106,18 +125,18 @@ class FileInterface {
 
   Status OpenReadOnly(const std::string& path) {
     path_ = path;
-    file_ = fopen(path.c_str(), "r");
+    file_ = fopen(path.c_str(), "rb");
     if (file_ == nullptr) {
       return Status::IOError("Unable to open file");
     }
 
     // Get and set file size
-    fseeko(file_, static_cast<off_t>(0), SEEK_END);
+    fseek_compat(file_, 0, SEEK_END);
     if (ferror(file_)) {
       return Status::IOError("Unable to seek to end of file");
     }
 
-    size_ = ftello(file_);
+    size_ = ftell_compat(file_);
 
     RETURN_NOT_OK(Seek(0));
 
@@ -153,12 +172,12 @@ class FileInterface {
   }
 
   Status Seek(int64_t pos) {
-    fseeko(file_, static_cast<off_t>(pos), SEEK_SET);
+    fseek_compat(file_, pos, SEEK_SET);
     return Status::OK();
   }
 
   int64_t Tell() const {
-    return static_cast<int64_t>(ftello(file_));
+    return ftell_compat(file_);
   }
 
   Status Write(const uint8_t* data, int64_t length) {
