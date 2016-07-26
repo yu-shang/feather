@@ -14,6 +14,12 @@
 
 #include "feather/io.h"
 
+#ifdef _FILE_OFFSET_BITS
+#undef _FILE_OFFSET_BITS
+#endif
+
+#define _FILE_OFFSET_BITS 64
+
 #ifdef _WIN32
 #define NOMINMAX
 #include "feather/mman.h"
@@ -37,12 +43,6 @@
 #include <cstring>
 #include <iostream>
 #include <sstream>
-
-#ifdef _FILE_OFFSET_BITS
-#undef _FILE_OFFSET_BITS
-#endif
-
-#define _FILE_OFFSET_BITS 64
 
 // ----------------------------------------------------------------------
 // file compatibility stuff
@@ -131,7 +131,7 @@ static inline int64_t lseek64_compat(int fd, int64_t pos, int whence) {
 #if defined(_WIN32)
   return _lseeki64(fd, pos, whence);
 #else
-  return lseek64(fd, pos, whence);
+  return lseek(fd, pos, whence);
 #endif
 }
 
@@ -177,7 +177,7 @@ static inline Status FileTell(int fd, int64_t* pos) {
     return Status::IOError("_telli64 failed");
   }
 #else
-  current_pos = lseek64(fd, 0, SEEK_CUR);
+  current_pos = lseek64_compat(fd, 0, SEEK_CUR);
   CHECK_LSEEK(current_pos);
 #endif
 
