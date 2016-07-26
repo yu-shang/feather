@@ -118,6 +118,14 @@ static inline Status CheckOpenResult(int ret, int errno_actual,
 #define CHECK_LSEEK(retval)                                     \
   if ((retval) == -1) return Status::IOError("lseek failed");
 
+static inline int64_t lseek64_compat(int fd, int64_t pos, int whence) {
+#if defined(_WIN32)
+  return _lseeki64(fd, pos, whence);
+#else
+  return lseek64(fd, pos, whence);
+#endif
+}
+
 static inline Status FileOpenReadable(const char* filename, int* fd) {
   int ret;
   errno_t errno_actual = 0;
@@ -169,14 +177,7 @@ static inline Status FileTell(int fd, int64_t* pos) {
 }
 
 static inline Status FileSeek(int fd, int64_t pos) {
-  int64_t ret;
-
-#if defined(_WIN32)
-  ret = _lseeki64(fd, pos, SEEK_SET);
-#else
-  ret = lseek64(fd, pos, SEEK_SET);
-#endif
-
+  int64_t ret = lseek64_compat(fd, pos, SEEK_SET);
   CHECK_LSEEK(ret);
   return Status::OK();
 }
@@ -218,32 +219,28 @@ static inline Status FileWrite(int fd, const uint8_t* buffer, int64_t nbytes) {
   return Status::OK();
 }
 
+
 static inline Status FileGetSize(int fd, int64_t* size) {
   int64_t ret;
 
-#if defined(_WIN32)
-  ret = _filelength(fd);
-  if (ret == -1) return Status::IOError("_filelength failed");
-  *size = ret;
-#else
   // Save current position
-  int64_t current_position = lseek64(fd, 0, SEEK_CUR);
+  int64_t current_position = lseek64_compat(fd, 0, SEEK_CUR);
   CHECK_LSEEK(current_position);
 
   // move to end of the file
-  ret = lseek64(fd, 0, SEEK_END);
+  ret = lseek64_compat(fd, 0, SEEK_END);
   CHECK_LSEEK(ret);
 
   // Get file length
-  ret = lseek64(fd, 0, SEEK_CUR);
+  ret = lseek64_compat(fd, 0, SEEK_CUR);
   CHECK_LSEEK(ret);
 
   *size = ret;
 
   // Restore file position
-  ret = lseek64(fd, current_position, SEEK_SET);
+  ret = lseek64_compat(fd, current_position, SEEK_SET);
   CHECK_LSEEK(ret);
-#endif
+
   return Status::OK();
 }
 
