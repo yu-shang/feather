@@ -20,8 +20,17 @@
 #undef Realloc
 #undef Free
 #include <windows.h>
-#else
+#else // POSIX-like platforms
+
 #include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+#ifndef errno_t
+#define errno_t int
+#endif
+
 #endif
 
 #include <algorithm>
@@ -140,7 +149,7 @@ static inline Status FileOpenReadable(const char* filename, int* fd) {
   errno_actual = errno;
 #endif
 
-  return CheckOpenResult(ret, errno, filename);
+  return CheckOpenResult(ret, errno_actual, filename);
 }
 
 static inline Status FileOpenWriteable(const char* filename, int* fd) {
@@ -153,9 +162,10 @@ static inline Status FileOpenWriteable(const char* filename, int* fd) {
       _SH_DENYNO, _S_IWRITE);
   ret = *fd;
 #else
-  ret = *fd = open(filename, O_WRONLY);
+  ret = *fd = open(filename, O_WRONLY | O_CREAT,
+      S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
 #endif
-  return CheckOpenResult(ret, errno, filename);
+  return CheckOpenResult(ret, errno_actual, filename);
 }
 
 static inline Status FileTell(int fd, int64_t* pos) {
