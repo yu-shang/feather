@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <iostream>
 #include <sstream>
 
 #ifdef _FILE_OFFSET_BITS
@@ -34,7 +35,23 @@
 
 #define _FILE_OFFSET_BITS 64
 
+// ----------------------------------------------------------------------
+// file compatibility stuff
+
+#if defined(__MINGW32__) // MinGW
+// nothing
+#elif defined(_WIN32)  // Visual Studio
+#include <io.h>
+#else // POSIX / Linux
+// nothing
+#endif
+
+#include <fcntl.h>
+
 #include <cstdio>
+
+// ----------------------------------------------------------------------
+// other feather includes
 
 #include "feather/buffer.h"
 #include "feather/status.h"
@@ -61,8 +78,9 @@ BufferReader::BufferReader(const std::shared_ptr<Buffer>& buffer) :
   size_ = buffer->size();
 }
 
-int64_t BufferReader::Tell() const {
-  return pos_;
+Status BufferReader::Tell(int64_t* pos) const {
+  *pos = pos_;
+  return Status::OK();
 }
 
 Status BufferReader::Seek(int64_t pos) {
@@ -84,74 +102,196 @@ Status BufferReader::Read(int64_t nbytes, std::shared_ptr<Buffer>* out) {
 }
 
 // ----------------------------------------------------------------------
-// LocalFileReader methods
+// Cross-platform file compatability layer
 
-static int fseek_compat(FILE* handle, int64_t offset, int whence) {
-#if defined(__MINGW32__)
-  return fseeko64(handle, offset, whence);
-#elif defined(_WIN32)
-  return _fseeki64(handle, offset, whence);
-#else
-  return fseeko(handle, offset, whence);
-#endif
+static inline Status CheckOpenResult(int ret, int errno_actual,
+    const char* filename) {
+  if (ret == -1) {
+    // TODO: errno codes to strings
+    std::stringstream ss;
+    ss << "Failed to open file: " << filename;
+    return Status::IOError(ss.str());
+  }
+  return Status::OK();
 }
 
-static int64_t ftell_compat(FILE* handle) {
-#if defined(__MINGW32__)
-  return ftello64(handle);
-#elif defined(_WIN32)
-  return _ftelli64(handle);
+#define CHECK_LSEEK(retval)                                     \
+  if ((retval) == -1) return Status::IOError("lseek failed");
+
+static inline Status FileOpenReadable(const char* filename, int* fd) {
+  int ret;
+  errno_t errno_actual = 0;
+
+#if defined(_WIN32)
+  // https://msdn.microsoft.com/en-us/library/w64k0ytk.aspx
+  errno_actual = _sopen_s(fd, filename, _O_RDONLY | _O_BINARY, _SH_DENYNO,
+      _S_IREAD);
+  ret = *fd;
 #else
-  return ftello(handle);
+  ret = *fd = open(filename, O_RDONLY);
+  errno_actual = errno;
 #endif
+
+  return CheckOpenResult(ret, errno, filename);
+}
+
+static inline Status FileOpenWriteable(const char* filename, int* fd) {
+  int ret;
+  errno_t errno_actual = 0;
+
+#if defined(_WIN32)
+  // https://msdn.microsoft.com/en-us/library/w64k0ytk.aspx
+  errno_actual = _sopen_s(fd, filename, _O_WRONLY | _O_CREAT | _O_BINARY,
+      _SH_DENYNO, _S_IWRITE);
+  ret = *fd;
+#else
+  ret = *fd = open(filename, O_WRONLY);
+#endif
+  return CheckOpenResult(ret, errno, filename);
+}
+
+static inline Status FileTell(int fd, int64_t* pos) {
+  int64_t current_pos;
+
+#if defined(_WIN32)
+  current_pos = _telli64(fd);
+  if (current_pos == -1) {
+    return Status::IOError("_telli64 failed");
+  }
+#else
+  current_pos = lseek64(fd, 0, SEEK_CUR);
+  CHECK_LSEEK(current_pos);
+#endif
+
+  *pos = current_pos;
+  return Status::OK();
+
+}
+
+static inline Status FileSeek(int fd, int64_t pos) {
+  int64_t ret;
+
+#if defined(_WIN32)
+  ret = _lseeki64(fd, pos, SEEK_SET);
+#else
+  ret = lseek64(fd, pos, SEEK_SET);
+#endif
+
+  CHECK_LSEEK(ret);
+  return Status::OK();
+}
+
+static inline Status FileRead(int fd, uint8_t* buffer, int64_t nbytes,
+    int64_t* bytes_read) {
+#if defined(_WIN32)
+  if (nbytes > INT32_MAX) {
+    return Status::IOError("Unable to read > 2GB blocks yet");
+  }
+  *bytes_read = _read(fd, buffer, static_cast<unsigned int>(nbytes));
+#else
+  *bytes_read = read(fd, buffer, nbytes);
+#endif
+
+  if (*bytes_read == -1) {
+    // TODO(wesm): errno to string
+    return Status::IOError("Error reading bytes from file");
+  }
+
+  return Status::OK();
+}
+
+static inline Status FileWrite(int fd, const uint8_t* buffer, int64_t nbytes) {
+  int ret;
+#if defined(_WIN32)
+  if (nbytes > INT32_MAX) {
+    return Status::IOError("Unable to write > 2GB blocks to file yet");
+  }
+  ret = _write(fd, buffer, static_cast<unsigned int>(nbytes));
+#else
+  ret = write(fd, buffer, nbytes);
+#endif
+
+  if (ret == -1) {
+    // TODO(wesm): errno to string
+    return Status::IOError("Error writing bytes to file");
+  }
+  return Status::OK();
+}
+
+static inline Status FileGetSize(int fd, int64_t* size) {
+  int64_t ret;
+
+#if defined(_WIN32)
+  ret = _filelength(fd);
+  if (ret == -1) return Status::IOError("_filelength failed");
+  *size = ret;
+#else
+  // Save current position
+  int64_t current_position = lseek64(fd, 0, SEEK_CUR);
+  CHECK_LSEEK(current_position);
+
+  // move to end of the file
+  ret = lseek64(fd, 0, SEEK_END);
+  CHECK_LSEEK(ret);
+
+  // Get file length
+  ret = lseek64(fd, 0, SEEK_CUR);
+  CHECK_LSEEK(ret);
+
+  *size = ret;
+
+  // Restore file position
+  ret = lseek64(fd, current_position, SEEK_SET);
+  CHECK_LSEEK(ret);
+#endif
+  return Status::OK();
+}
+
+static inline Status FileClose(int fd) {
+  int ret;
+
+#if defined(_WIN32)
+  ret = _close(fd);
+#else
+  ret = close(fd);
+#endif
+
+  if (ret == -1) {
+    return Status::IOError("error closing file");
+  }
+  return Status::OK();
 }
 
 class FileInterface {
  public:
   FileInterface() :
-      file_(nullptr), is_open_(false), size_(-1) {}
+      fd_(-1), is_open_(false), size_(-1) {}
 
   ~FileInterface() {}
 
   Status OpenWritable(const std::string& path) {
+    RETURN_NOT_OK(FileOpenWriteable(path.c_str(), &fd_));
     path_ = path;
-    file_ = fopen(path.c_str(), "wb");
-    if (file_ == nullptr || ferror(file_)) {
-      return Status::IOError("Unable to open file");
-    }
     is_open_ = true;
     return Status::OK();
   }
 
-  Status OpenReadOnly(const std::string& path) {
+  Status OpenReadable(const std::string& path) {
+    RETURN_NOT_OK(FileOpenReadable(path.c_str(), &fd_));
+    RETURN_NOT_OK(FileGetSize(fd_, &size_));
+
+    // The position should be 0 after GetSize
+    // RETURN_NOT_OK(Seek(0));
+
     path_ = path;
-    file_ = fopen(path.c_str(), "rb");
-    if (file_ == nullptr) {
-      return Status::IOError("Unable to open file");
-    }
-
-    // Get and set file size
-    fseek_compat(file_, 0, SEEK_END);
-    if (ferror(file_)) {
-      return Status::IOError("Unable to seek to end of file");
-    }
-
-    size_ = ftell_compat(file_);
-
-    RETURN_NOT_OK(Seek(0));
-
     is_open_ = true;
-
     return Status::OK();
   }
 
   Status Close() {
     if (is_open_) {
-      int code = fclose(file_);
+      RETURN_NOT_OK(FileClose(fd_));
       is_open_ = false;
-      if (code != 0) {
-        return Status::IOError("error closing file");
-      }
     }
     return Status::OK();
   }
@@ -159,36 +299,38 @@ class FileInterface {
   Status Read(int64_t nbytes, std::shared_ptr<Buffer>* out) {
     auto buffer = std::make_shared<OwnedMutableBuffer>();
     RETURN_NOT_OK(buffer->Resize(nbytes));
-    int64_t bytes_read = fread(buffer->mutable_data(), 1, nbytes, file_);
-    if (bytes_read < nbytes) {
-      // Exception if not EOF
-      if (!feof(file_)) {
-        return Status::IOError("Error reading bytes from file");
-      }
+
+    int64_t bytes_read = 0;
+    RETURN_NOT_OK(FileRead(fd_, buffer->mutable_data(), nbytes, &bytes_read));
+
+    // heuristic
+    if (bytes_read < nbytes / 2) {
       RETURN_NOT_OK(buffer->Resize(bytes_read));
     }
+
     *out = buffer;
     return Status::OK();
   }
 
   Status Seek(int64_t pos) {
-    fseek_compat(file_, pos, SEEK_SET);
-    return Status::OK();
+    return FileSeek(fd_, pos);
   }
 
-  int64_t Tell() const {
-    return ftell_compat(file_);
+  Status Tell(int64_t* pos) const {
+    return FileTell(fd_, pos);
   }
 
   Status Write(const uint8_t* data, int64_t length) {
-    fwrite(data, 1, length, file_);
-    if (ferror(file_)) {
-      return Status::IOError("error writing bytes to file");
-    }
-    return Status::OK();
+    // fwrite(data, 1, length, fd_);
+    // if (ferror(fd_)) {
+    //   return Status::IOError("error writing bytes to file");
+    // }
+    // return Status::OK();
+
+    return FileWrite(fd_, data, length);
   }
 
-  int fd_number() const { return fileno(file_);}
+  int fd() const { return fd_;}
 
   bool is_open() const { return is_open_;}
   const std::string& path() const { return path_;}
@@ -197,10 +339,16 @@ class FileInterface {
 
  private:
   std::string path_;
-  FILE* file_;
+
+  // File descriptor
+  int fd_;
+
   bool is_open_;
   int64_t size_;
 };
+
+// ----------------------------------------------------------------------
+// LocalFileReader methods
 
 LocalFileReader::LocalFileReader() {
   impl_.reset(new FileInterface());
@@ -211,7 +359,7 @@ LocalFileReader::~LocalFileReader() {
 }
 
 Status LocalFileReader::Open(const std::string& path) {
-  RETURN_NOT_OK(impl_->OpenReadOnly(path));
+  RETURN_NOT_OK(impl_->OpenReadable(path));
   size_ = impl_->size();
   return Status::OK();
 }
@@ -224,8 +372,8 @@ Status LocalFileReader::Seek(int64_t pos) {
   return impl_->Seek(pos);
 }
 
-int64_t LocalFileReader::Tell() const {
-  return impl_->Tell();
+Status LocalFileReader::Tell(int64_t* pos) const {
+  return impl_->Tell(pos);
 }
 
 Status LocalFileReader::Read(int64_t nbytes, std::shared_ptr<Buffer>* out) {
@@ -242,7 +390,7 @@ MemoryMapReader::~MemoryMapReader() {
 Status MemoryMapReader::Open(const std::string& path) {
   RETURN_NOT_OK(LocalFileReader::Open(path));
   data_ = reinterpret_cast<uint8_t*>(mmap(nullptr, size_, PROT_READ,
-          MAP_SHARED, impl_->fd_number(), 0));
+          MAP_SHARED, impl_->fd(), 0));
   if (data_ == nullptr) {
     return Status::IOError("Memory mapping file failed");
   }
@@ -263,8 +411,9 @@ Status MemoryMapReader::Seek(int64_t pos) {
   return Status::OK();
 }
 
-int64_t MemoryMapReader::Tell() const {
-  return pos_;
+Status MemoryMapReader::Tell(int64_t* pos) const {
+  *pos = pos_;
+  return Status::OK();
 }
 
 Status MemoryMapReader::Read(int64_t nbytes, std::shared_ptr<Buffer>* out) {
@@ -308,8 +457,9 @@ Status InMemoryOutputStream::Write(const uint8_t* data, int64_t length) {
   return Status::OK();
 }
 
-int64_t InMemoryOutputStream::Tell() const {
-  return size_;
+Status InMemoryOutputStream::Tell(int64_t* pos) const {
+  *pos = size_;
+  return Status::OK();
 }
 
 std::shared_ptr<Buffer> InMemoryOutputStream::Finish() {
@@ -340,8 +490,8 @@ Status FileOutputStream::Close() {
   return impl_->Close();
 }
 
-int64_t FileOutputStream::Tell() const {
-  return impl_->Tell();
+Status FileOutputStream::Tell(int64_t* pos) const {
+  return impl_->Tell(pos);
 }
 
 Status FileOutputStream::Write(const uint8_t* data, int64_t length) {

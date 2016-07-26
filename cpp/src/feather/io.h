@@ -37,7 +37,7 @@ class RandomAccessReader {
  public:
   virtual ~RandomAccessReader() {}
 
-  virtual int64_t Tell() const = 0;
+  virtual Status Tell(int64_t* pos) const = 0;
   virtual Status Seek(int64_t pos) = 0;
 
   // Read data from source at position (seeking if necessary), returning copy
@@ -68,10 +68,9 @@ class LocalFileReader : public RandomAccessReader {
   Status Open(const std::string& path);
   void CloseFile();
 
-  virtual int64_t Tell() const;
-  virtual Status Seek(int64_t pos);
-
-  virtual Status Read(int64_t nbytes, std::shared_ptr<Buffer>* out);
+  Status Tell(int64_t* pos) const override;
+  Status Seek(int64_t pos) override;
+  Status Read(int64_t nbytes, std::shared_ptr<Buffer>* out) override;
 
  protected:
   std::unique_ptr<FileInterface> impl_;
@@ -89,9 +88,9 @@ class MemoryMapReader : public LocalFileReader {
   Status Open(const std::string& path);
   void CloseFile();
 
-  virtual int64_t Tell() const;
-  virtual Status Seek(int64_t pos);
-  virtual Status Read(int64_t nbytes, std::shared_ptr<Buffer>* out);
+  Status Tell(int64_t* pos) const override;
+  Status Seek(int64_t pos) override;
+  Status Read(int64_t nbytes, std::shared_ptr<Buffer>* out) override;
 
  private:
   uint8_t* data_;
@@ -104,10 +103,9 @@ class BufferReader : public RandomAccessReader {
  public:
   explicit BufferReader(const std::shared_ptr<Buffer>& buffer);
 
-  virtual int64_t Tell() const;
-  virtual Status Seek(int64_t pos);
-
-  virtual Status Read(int64_t nbytes, std::shared_ptr<Buffer>* out);
+  Status Tell(int64_t* pos) const override;
+  Status Seek(int64_t pos) override;
+  Status Read(int64_t nbytes, std::shared_ptr<Buffer>* out) override;
 
  protected:
   const uint8_t* Head() {
@@ -130,7 +128,7 @@ class OutputStream {
   // Close the output stream
   virtual Status Close() = 0;
 
-  virtual int64_t Tell() const = 0;
+  virtual Status Tell(int64_t* pos) const = 0;
 
   virtual Status Write(const uint8_t* data, int64_t length) = 0;
 };
@@ -143,11 +141,9 @@ class InMemoryOutputStream : public OutputStream {
 
   virtual ~InMemoryOutputStream() {}
 
-  virtual Status Close();
-
-  virtual int64_t Tell() const;
-
-  virtual Status Write(const uint8_t* data, int64_t length);
+  Status Close() override;
+  Status Tell(int64_t* pos) const override;
+  Status Write(const uint8_t* data, int64_t length) override;
 
   // Hand off the buffered data to a new owner
   std::shared_ptr<Buffer> Finish();
@@ -167,11 +163,9 @@ class FileOutputStream : public OutputStream {
 
   Status Open(const std::string& path);
 
-  virtual Status Close();
-
-  virtual int64_t Tell() const;
-
-  virtual Status Write(const uint8_t* data, int64_t length);
+  Status Close() override;
+  Status Tell(int64_t* pos) const override;
+  Status Write(const uint8_t* data, int64_t length) override;
 
   // Hand off the buffered data to a new owner
   std::shared_ptr<Buffer> Finish();
