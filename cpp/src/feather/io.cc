@@ -183,7 +183,6 @@ static inline Status FileTell(int fd, int64_t* pos) {
 
   *pos = current_pos;
   return Status::OK();
-
 }
 
 static inline Status FileSeek(int fd, int64_t pos) {
