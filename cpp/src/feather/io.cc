@@ -12,30 +12,50 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "feather/io.h"
-
 #ifdef _FILE_OFFSET_BITS
 #undef _FILE_OFFSET_BITS
 #endif
 
 #define _FILE_OFFSET_BITS 64
 
-#ifdef _WIN32
+#include "feather/io.h"
+
+// sys/mman.h not present in Visual Studio or Cygwin
+#if _WIN32
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include "feather/mman.h"
 #undef Realloc
 #undef Free
 #include <windows.h>
-#else // POSIX-like platforms
-
+#else
 #include <sys/mman.h>
+#endif
+
 #include <sys/stat.h>
 #include <sys/types.h>
+
+#ifndef _MSC_VER // POSIX-like platforms
+
 #include <unistd.h>
 
 #ifndef errno_t
 #define errno_t int
 #endif
+
+#endif
+
+// defines that
+#if defined(__MINGW32__)
+
+#define FEATHER_WRITE_SHMODE S_IRUSR | S_IWUSR
+
+#elif defined(_MSC_VER) // Visual Studio
+
+#else // gcc / clang on POSIX platforms
+
+#define FEATHER_WRITE_SHMODE S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH
 
 #endif
 
@@ -49,7 +69,7 @@
 
 #if defined(__MINGW32__) // MinGW
 // nothing
-#elif defined(_WIN32)  // Visual Studio
+#elif defined(_MSC_VER)  // Visual Studio
 #include <io.h>
 #else // POSIX / Linux
 // nothing
@@ -128,7 +148,7 @@ static inline Status CheckOpenResult(int ret, int errno_actual,
   if ((retval) == -1) return Status::IOError("lseek failed");
 
 static inline int64_t lseek64_compat(int fd, int64_t pos, int whence) {
-#if defined(_WIN32)
+#if defined(_MSC_VER)
   return _lseeki64(fd, pos, whence);
 #else
   return lseek(fd, pos, whence);
@@ -139,7 +159,7 @@ static inline Status FileOpenReadable(const char* filename, int* fd) {
   int ret;
   errno_t errno_actual = 0;
 
-#if defined(_WIN32)
+#if defined(_MSC_VER)
   // https://msdn.microsoft.com/en-us/library/w64k0ytk.aspx
   errno_actual = _sopen_s(fd, filename, _O_RDONLY | _O_BINARY, _SH_DENYNO,
       _S_IREAD);
@@ -156,14 +176,13 @@ static inline Status FileOpenWriteable(const char* filename, int* fd) {
   int ret;
   errno_t errno_actual = 0;
 
-#if defined(_WIN32)
+#if defined(_MSC_VER)
   // https://msdn.microsoft.com/en-us/library/w64k0ytk.aspx
   errno_actual = _sopen_s(fd, filename, _O_WRONLY | _O_CREAT | _O_BINARY,
       _SH_DENYNO, _S_IWRITE);
   ret = *fd;
 #else
-  ret = *fd = open(filename, O_WRONLY | O_CREAT,
-      S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+  ret = *fd = open(filename, O_WRONLY | O_CREAT, FEATHER_WRITE_SHMODE);
 #endif
   return CheckOpenResult(ret, errno_actual, filename);
 }
@@ -171,7 +190,7 @@ static inline Status FileOpenWriteable(const char* filename, int* fd) {
 static inline Status FileTell(int fd, int64_t* pos) {
   int64_t current_pos;
 
-#if defined(_WIN32)
+#if defined(_MSC_VER)
   current_pos = _telli64(fd);
   if (current_pos == -1) {
     return Status::IOError("_telli64 failed");
@@ -193,7 +212,7 @@ static inline Status FileSeek(int fd, int64_t pos) {
 
 static inline Status FileRead(int fd, uint8_t* buffer, int64_t nbytes,
     int64_t* bytes_read) {
-#if defined(_WIN32)
+#if defined(_MSC_VER)
   if (nbytes > INT32_MAX) {
     return Status::IOError("Unable to read > 2GB blocks yet");
   }
@@ -212,7 +231,7 @@ static inline Status FileRead(int fd, uint8_t* buffer, int64_t nbytes,
 
 static inline Status FileWrite(int fd, const uint8_t* buffer, int64_t nbytes) {
   int ret;
-#if defined(_WIN32)
+#if defined(_MSC_VER)
   if (nbytes > INT32_MAX) {
     return Status::IOError("Unable to write > 2GB blocks to file yet");
   }
@@ -256,7 +275,7 @@ static inline Status FileGetSize(int fd, int64_t* size) {
 static inline Status FileClose(int fd) {
   int ret;
 
-#if defined(_WIN32)
+#if defined(_MSC_VER)
   ret = _close(fd);
 #else
   ret = close(fd);
